@@ -799,9 +799,101 @@ with tab_reg:
         st.info("Nenhum ensaio registrado ainda.")
     else:
         opcoes = [f"{e.get('amostra','Ensaio')} — {e.get('data','')}" for e in ensaios]
-        sel = st.selectbox("Selecione o ensaio para deletar:", opcoes)
-        if st.button("Deletar Ensaio Selecionado", type="secondary"):
-            idx = opcoes.index(sel)
+        sel = st.selectbox("Selecione o ensaio:", opcoes, key="manage_sel")
+        idx = opcoes.index(sel)
+        ensaio_sel = ensaios[idx]
+
+        # ── Editar ensaio selecionado ───────────────────────────────────
+        with st.expander("✏️ Editar ensaio selecionado", expanded=False):
+            st.caption("Altere os campos e a tabela; clique em Salvar Alteracoes para gravar por cima.")
+
+            ec1, ec2, ec3 = st.columns(3)
+            with ec1:
+                e_amostra = st.text_input(
+                    "Identificacao da Amostra *",
+                    value=ensaio_sel.get("amostra", ""),
+                    key=f"edit_amostra_{idx}",
+                )
+            with ec2:
+                try:
+                    d_val = datetime.strptime(ensaio_sel.get("data", ""), "%d/%m/%Y").date()
+                except Exception:
+                    d_val = date.today()
+                e_data = st.date_input("Data do Ensaio *", value=d_val, key=f"edit_data_{idx}")
+            with ec3:
+                e_umid = st.number_input(
+                    "Umidade (%)", min_value=0.0, max_value=100.0,
+                    value=float(to_float(ensaio_sel.get("umidade", 0))),
+                    step=0.01, format="%.2f", key=f"edit_umid_{idx}",
+                )
+
+            st.markdown("**Aberturas (mm) e Massas Retidas (g)**")
+
+            # Pré-preenche a tabela com as massas existentes (mantendo a ordem padrão),
+            # deixando linhas extras em branco para acrescentar peneiras se quiser.
+            massas_sel = ensaio_sel.get("massas", {})
+            ordered_keys = [k for k in ABERTURAS if k in massas_sel] + \
+                           [k for k in massas_sel if k not in ABERTURAS]
+            ab_list = list(ordered_keys)
+            massa_list = [to_float(massas_sel.get(k, 0)) for k in ordered_keys]
+            while len(ab_list) < 15:
+                ab_list.append("")
+                massa_list.append(0.0)
+            df_edit = pd.DataFrame({"Abertura (mm)": ab_list, "Massa (g)": massa_list})
+
+            edited_edit_df = st.data_editor(
+                df_edit,
+                num_rows="fixed",
+                use_container_width=True,
+                hide_index=True,
+                key=f"edit_table_{idx}",
+                column_config={
+                    "Abertura (mm)": st.column_config.TextColumn(
+                        "Abertura (mm)", width="medium", help="Ex: 50.8, 38.1, <6.35",
+                    ),
+                    "Massa (g)": st.column_config.NumberColumn(
+                        "Massa (g)", width="medium", min_value=0.0, step=0.01,
+                        format="%.2f", help="Massa retida em gramas",
+                    ),
+                },
+            )
+
+            total_edit = sum(to_float(v) for v in edited_edit_df["Massa (g)"])
+            cole1, cole2 = st.columns([3, 1])
+            with cole2:
+                st.metric("TOTAL (g)", f"{total_edit:.2f}")
+
+            if st.button("💾 Salvar Alteracoes", type="primary",
+                         use_container_width=True, key=f"save_edit_{idx}"):
+                if not str(e_amostra).strip():
+                    st.error("Informe a identificacao da amostra.")
+                elif total_edit == 0:
+                    st.error("Informe ao menos uma massa maior que zero.")
+                else:
+                    novas_massas = {}
+                    for _, row in edited_edit_df.iterrows():
+                        ab = str(row["Abertura (mm)"]).strip()
+                        m = to_float(row["Massa (g)"])
+                        if ab and m > 0:
+                            novas_massas[ab] = m
+                    if not novas_massas:
+                        st.error("Informe ao menos uma abertura com massa > 0.")
+                    else:
+                        ensaios[idx] = {
+                            "amostra": str(e_amostra).strip(),
+                            "data": e_data.strftime("%d/%m/%Y"),
+                            "umidade": float(e_umid),
+                            "massas": novas_massas,
+                        }
+                        data["ensaios"] = ensaios
+                        if save_data(data):
+                            st.success(f"✅ Ensaio '{str(e_amostra).strip()}' atualizado!")
+                            st.rerun()
+                        else:
+                            st.error("Erro ao salvar as alteracoes.")
+
+        # ── Deletar ensaio selecionado ──────────────────────────────────
+        if st.button("🗑️ Deletar Ensaio Selecionado", type="secondary"):
             ensaios.pop(idx)
             data["ensaios"] = ensaios
             if save_data(data):
