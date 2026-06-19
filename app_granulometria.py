@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime, date
 import json
 import os
+import io
 
 try:
     from fpdf import FPDF
@@ -339,6 +340,66 @@ def gerar_pdf_dashboard(ensaios):
     return bytes(pdf.output())
 
 
+# ── Backup / Restauração (Excel) ──────────────────────────────────────────────
+
+def gerar_xlsx(ensaios):
+    """Excel com uma linha por ensaio (colunas = aberturas). Serve de backup
+    e pode ser reimportado depois para restaurar os dados."""
+    rows = []
+    for e in get_sorted(ensaios):
+        massas = e.get("massas", {})
+        row = {"Amostra": e.get("amostra", ""), "Data": e.get("data", ""),
+               "Umidade (%)": to_float(e.get("umidade", 0))}
+        for ab in ABERTURAS:
+            row[ab] = to_float(massas.get(ab, 0))
+        rows.append(row)
+    df = pd.DataFrame(rows, columns=["Amostra", "Data", "Umidade (%)"] + ABERTURAS)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Ensaios")
+    return buf.getvalue()
+
+
+def importar_ensaios(file):
+    """Lê um .xlsx (backup acima) OU o .csv exportado e reconstrói os ensaios."""
+    nome = (getattr(file, "name", "") or "").lower()
+    df = pd.read_csv(file) if nome.endswith(".csv") else pd.read_excel(file)
+    df.columns = [str(c).strip() for c in df.columns]
+    novos = []
+
+    if "Malha (mm)" in df.columns and "Massa (g)" in df.columns:
+        # Formato CSV achatado (uma linha por malha).
+        for amostra in df["Amostra"].dropna().unique():
+            sub = df[df["Amostra"] == amostra]
+            for data_e in sub["Data"].dropna().unique():
+                linhas = sub[sub["Data"] == data_e]
+                massas = {}
+                for _, r in linhas.iterrows():
+                    malha = str(r["Malha (mm)"]).strip()
+                    if malha in ABERTURAS:
+                        m = to_float(r["Massa (g)"])
+                        if m > 0:
+                            massas[malha] = m
+                if massas:
+                    umid = to_float(linhas.iloc[0].get("Umidade (%)", 0))
+                    novos.append({"amostra": str(amostra).strip(), "data": str(data_e).strip(),
+                                  "umidade": umid, "massas": massas})
+    else:
+        # Formato backup (uma linha por ensaio; colunas = aberturas).
+        for _, r in df.iterrows():
+            massas = {}
+            for ab in ABERTURAS:
+                if ab in df.columns:
+                    m = to_float(r.get(ab, 0))
+                    if m > 0:
+                        massas[ab] = m
+            amostra = str(r.get("Amostra", "")).strip()
+            if amostra and massas:
+                novos.append({"amostra": amostra, "data": str(r.get("Data", "")).strip(),
+                              "umidade": to_float(r.get("Umidade (%)", 0)), "massas": massas})
+    return novos
+
+
 # ── Cabeçalho ────────────────────────────────────────────────────────────────
 
 col_logo, col_titulo, col_hora = st.columns([1, 4, 1])
@@ -374,6 +435,36 @@ tab_dash, tab_reg = st.tabs(["Dashboard", "Registrar Ensaio"])
 #   DASHBOARD
 # ═══════════════════════════════════════════════════════════════════════
 with tab_dash:
+    with st.expander("💾 Backup / Restauração (Excel) — para não perder os dados", expanded=(not ensaios)):
+        st.caption("O Streamlit Cloud guarda os dados de forma temporária (podem sumir ao reiniciar). "
+                   "Baixe o Excel como backup; se os dados sumirem, restaure pelo arquivo salvo.")
+        bk1, bk2 = st.columns(2)
+        with bk1:
+            try:
+                xlsx_bytes = gerar_xlsx(ensaios)
+                st.download_button(
+                    "💾 Baixar Excel (.xlsx)", data=xlsx_bytes,
+                    file_name=f"granulometria_backup_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, disabled=not ensaios,
+                )
+            except Exception as ex:
+                st.warning(f"Não foi possível gerar o Excel: {ex}")
+        with bk2:
+            up = st.file_uploader("Carregar Excel/CSV salvo", type=["xlsx", "csv"], key="import_file")
+            if up is not None and st.button("📥 Restaurar do arquivo", use_container_width=True):
+                try:
+                    novos = importar_ensaios(up)
+                    if novos:
+                        data["ensaios"] = novos
+                        if save_data(data):
+                            st.success(f"{len(novos)} ensaio(s) restaurados! (substitui os atuais)")
+                            st.rerun()
+                    else:
+                        st.warning("Nenhum ensaio reconhecido no arquivo.")
+                except Exception as ex:
+                    st.error(f"Erro ao ler o arquivo: {ex}")
+
     if not ensaios:
         st.info("Nenhum ensaio registrado. Use a aba 'Registrar Ensaio'.")
     else:
